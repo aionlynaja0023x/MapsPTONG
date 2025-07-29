@@ -49,7 +49,7 @@ z<!DOCTYPE html>
     </div>
     <div id="map"></div>
     <video id="video" autoplay playsinline></video>
-    <div id="overlay">เลี้ยวซ้าย</div>
+    <div id="overlay"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
@@ -59,28 +59,38 @@ z<!DOCTYPE html>
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
 
-        let userMarker, routeLayer, video, stream, destination;
+        let userMarker, routeLayer, video, stream, destination, routeCoords = [], routeInstructions = [];
         const overlay = document.getElementById('overlay');
         const destinations = {
             ortho: { lat: 17.4775173, lng: 103.4585825, name: 'ตึกศัลยกรรมกระดูก' },
             thai: { lat: 17.4771491, lng: 103.4590181, name: 'อาคารแพทย์แผนไทย' }
         };
 
-        // Get user location
-        navigator.geolocation.watchPosition(
-            (position) => {
-                const { latitude, longitude } = position.coords;
-                if (!userMarker) {
-                    userMarker = L.marker([latitude, longitude]).addTo(map);
-                    map.setView([latitude, longitude], 18);
-                } else {
-                    userMarker.setLatLng([latitude, longitude]);
-                }
-                updateNavigation();
-            },
-            (error) => console.error('Geolocation error:', error),
-            { enableHighAccuracy: true }
-        );
+        // Watch user location in real time
+        let watchId = null;
+        function startLocationWatch() {
+            if (watchId !== null) return;
+            watchId = navigator.geolocation.watchPosition(
+                (position) => {
+                    const { latitude, longitude } = position.coords;
+                    if (!userMarker) {
+                        userMarker = L.marker([latitude, longitude]).addTo(map);
+                        map.setView([latitude, longitude], 18);
+                    } else {
+                        userMarker.setLatLng([latitude, longitude]);
+                    }
+                    updateNavigation([latitude, longitude]);
+                },
+                (error) => console.error('Geolocation error:', error),
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+            );
+        }
+        function stopLocationWatch() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
+        }
 
         // Start camera
         async function startCamera() {
@@ -123,37 +133,50 @@ z<!DOCTYPE html>
                 })
             });
             const data = await response.json();
+            // Extract coordinates and instructions
+            routeCoords = data.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
+            routeInstructions = data.features[0].properties.segments[0].steps.map(step => ({
+                instruction: step.instruction,
+                lat: step.way_points ? routeCoords[step.way_points[0]]?.[0] : null,
+                lng: step.way_points ? routeCoords[step.way_points[0]]?.[1] : null
+            }));
             return data;
         }
 
-        // Calculate bearing between two points
-        function calculateBearing(start, end) {
-            const [lat1, lon1] = start;
-            const [lat2, lon2] = end;
-            const dLon = (lon2 - lon1) * Math.PI / 180;
-            const lat1Rad = lat1 * Math.PI / 180;
-            const lat2Rad = lat2 * Math.PI / 180;
-            const y = Math.sin(dLon) * Math.cos(lat2Rad);
-            const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
-            return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        // Calculate distance between two points (Haversine)
+        function getDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const toRad = x => x * Math.PI / 180;
+            const dLat = toRad(lat2 - lat1);
+            const dLon = toRad(lon2 - lon1);
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
         }
 
-        // Update navigation instructions
-        function updateNavigation() {
-            if (!destination || !userMarker) return;
-            const userPos = userMarker.getLatLng();
-            const bearing = calculateBearing([userPos.lat, userPos.lng], [destination.lat, destination.lng]);
-            navigator.geolocation.getCurrentPosition((position) => {
-                const heading = position.coords.heading || 0;
-                const relativeBearing = (bearing - heading + 360) % 360;
-                let instruction = 'เดินตรงไป';
-                if (relativeBearing > 45 && relativeBearing < 135) {
-                    instruction = 'เลี้ยวขวา';
-                } else if (relativeBearing > 225 && relativeBearing < 315) {
-                    instruction = 'เลี้ยวซ้าย';
+        // Update navigation instructions in real time
+        function updateNavigation(userLatLng) {
+            if (!destination || !userLatLng || routeInstructions.length === 0) return;
+            let minDist = Infinity, nearestStep = null;
+            for (const step of routeInstructions) {
+                if (step.lat && step.lng) {
+                    const dist = getDistance(userLatLng[0], userLatLng[1], step.lat, step.lng);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestStep = step;
+                    }
                 }
-                overlay.textContent = instruction;
-            });
+            }
+            // ถ้าใกล้จุดเลี้ยวมากๆ ให้แสดงคำแนะนำของ step ถัดไป
+            if (minDist < 15 && nearestStep) {
+                overlay.textContent = nearestStep.instruction;
+            } else if (minDist < 50 && nearestStep) {
+                overlay.textContent = 'เตรียม ' + nearestStep.instruction;
+            } else {
+                overlay.textContent = 'เดินตรงไปตามเส้นทาง';
+            }
         }
 
         // Start navigation
@@ -167,7 +190,18 @@ z<!DOCTYPE html>
             L.marker([destination.lat, destination.lng]).addTo(map).bindPopup(destination.name).openPopup();
             map.setView([destination.lat, destination.lng], 18);
             await startCamera();
+            startLocationWatch();
 
+            // รอให้ userMarker มีตำแหน่งก่อนคำนวณเส้นทาง
+            let waitCount = 0;
+            while (!userMarker && waitCount < 20) {
+                await new Promise(r => setTimeout(r, 300));
+                waitCount++;
+            }
+            if (!userMarker) {
+                alert('ไม่สามารถดึงตำแหน่งผู้ใช้ได้');
+                return;
+            }
             const userPos = userMarker.getLatLng();
             const routeData = await getRoute([userPos.lat, userPos.lng], [destination.lat, destination.lng]);
             if (routeLayer) map.removeLayer(routeLayer);
@@ -180,9 +214,12 @@ z<!DOCTYPE html>
         // Stop navigation
         function stopNavigation() {
             stopCamera();
+            stopLocationWatch();
             if (routeLayer) map.removeLayer(routeLayer);
             overlay.textContent = '';
             destination = null;
+            routeCoords = [];
+            routeInstructions = [];
         }
     </script>
 </body>
