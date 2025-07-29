@@ -1,0 +1,7 @@
+# ไฟล์/โฟลเดอร์ที่ไม่ต้องการอัปโหลดขึ้น GitHub
+node_modules/
+.DS_Store
+Thumbs.db
+.env
+*.log
+.vscode/

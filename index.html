@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Navigation to Sawang Daen Din Buildings</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: Arial, sans-serif; }
+        #map { height: 50vh; width: 100%; }
+        #video { width: 100%; height: 50vh; object-fit: cover; }
+        #overlay { 
+            position: absolute; 
+            top: 50vh; 
+            left: 0; 
+            width: 100%; 
+            height: 50vh; 
+            pointer-events: none; 
+            z-index: 1000; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            color: red; 
+            font-size: 24px; 
+            font-weight: bold; 
+            text-shadow: 0 0 5px white; 
+        }
+        #controls { 
+            padding: 10px; 
+            background: #fff; 
+            box-shadow: 0 0 5px rgba(0,0,0,0.2); 
+        }
+        select, button { 
+            margin: 5px; 
+            padding: 8px; 
+            font-size: 16px; 
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <select id="destinationSelect">
+            <option value="">Select Destination</option>
+            <option value="ortho">ตึกศัลยกรรมกระดูก (Orthopedic Surgery)</option>
+            <option value="thai">อาคารแพทย์แผนไทย (Traditional Thai Medicine)</option>
+        </select>
+        <button onclick="startNavigation()">Start Navigation</button>
+        <button onclick="stopNavigation()">Stop Navigation</button>
+    </div>
+    <div id="map"></div>
+    <video id="video" autoplay playsinline></video>
+    <div id="overlay">Turn Left</div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Initialize map centered on Sawang Daen Din
+        const map = L.map('map').setView([17.47724, 103.4579086], 18);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        let userMarker, routeLayer, video, stream, destination;
+        const overlay = document.getElementById('overlay');
+        const destinations = {
+            ortho: { lat: 17.4775173, lng: 103.4585825, name: 'ตึกศัลยกรรมกระดูก' },
+            thai: { lat: 17.4771491, lng: 103.4590181, name: 'อาคารแพทย์แผนไทย' }
+        };
+
+        // Get user location
+        navigator.geolocation.watchPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                if (!userMarker) {
+                    userMarker = L.marker([latitude, longitude]).addTo(map);
+                    map.setView([latitude, longitude], 18);
+                } else {
+                    userMarker.setLatLng([latitude, longitude]);
+                }
+                updateNavigation();
+            },
+            (error) => console.error('Geolocation error:', error),
+            { enableHighAccuracy: true }
+        );
+
+        // Start camera
+        async function startCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment' } 
+                });
+                video = document.getElementById('video');
+                video.srcObject = stream;
+                video.style.display = 'block';
+                overlay.style.display = 'flex';
+            } catch (err) {
+                console.error('Camera error:', err);
+                alert('Failed to access camera. Ensure HTTPS and camera permissions.');
+            }
+        }
+
+        // Stop camera
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                video.style.display = 'none';
+                overlay.style.display = 'none';
+            }
+        }
+
+        // Calculate route using OpenRouteService
+        async function getRoute(start, end) {
+            const apiKey = '5b3ce3597851110001cf6248d0b9e6f8a4c04f7e9b2c3d5e7f1a2b3c'; // Replace with your OpenRouteService API key
+            const url = `https://api.openrouteservice.org/v2/directions/foot-walking/geojson`;
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Authorization': apiKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    coordinates: [[start[1], start[0]], [end[1], end[0]]],
+                    instructions: true
+                })
+            });
+            const data = await response.json();
+            return data;
+        }
+
+        // Calculate bearing between two points
+        function calculateBearing(start, end) {
+            const [lat1, lon1] = start;
+            const [lat2, lon2] = end;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const lat1Rad = lat1 * Math.PI / 180;
+            const lat2Rad = lat2 * Math.PI / 180;
+            const y = Math.sin(dLon) * Math.cos(lat2Rad);
+            const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
+            return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        }
+
+        // Update navigation instructions
+        function updateNavigation() {
+            if (!destination || !userMarker) return;
+            const userPos = userMarker.getLatLng();
+            const bearing = calculateBearing([userPos.lat, userPos.lng], [destination.lat, destination.lng]);
+            navigator.geolocation.getCurrentPosition((position) => {
+                const heading = position.coords.heading || 0;
+                const relativeBearing = (bearing - heading + 360) % 360;
+                let instruction = 'เดินตรงไป';
+                if (relativeBearing > 45 && relativeBearing < 135) {
+                    instruction = 'เลี้ยวขวา';
+                } else if (relativeBearing > 225 && relativeBearing < 315) {
+                    instruction = 'เลี้ยวซ้าย';
+                }
+                overlay.textContent = instruction;
+            });
+        }
+
+        // Start navigation
+        async function startNavigation() {
+            const selected = document.getElementById('destinationSelect').value;
+            if (!selected) {
+                alert('Please select a destination.');
+                return;
+            }
+            destination = destinations[selected];
+            L.marker([destination.lat, destination.lng]).addTo(map).bindPopup(destination.name).openPopup();
+            map.setView([destination.lat, destination.lng], 18);
+            await startCamera();
+
+            const userPos = userMarker.getLatLng();
+            const routeData = await getRoute([userPos.lat, userPos.lng], [destination.lat, destination.lng]);
+            if (routeLayer) map.removeLayer(routeLayer);
+            routeLayer = L.geoJSON(routeData, {
+                style: { color: '#0000FF', weight: 5 }
+            }).addTo(map);
+            map.fitBounds(routeLayer.getBounds());
+        }
+
+        // Stop navigation
+        function stopNavigation() {
+            stopCamera();
+            if (routeLayer) map.removeLayer(routeLayer);
+            overlay.textContent = '';
+            destination = null;
+        }
+    </script>
+</body>
+</html>
